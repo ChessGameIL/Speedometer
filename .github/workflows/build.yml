@@ -1,0 +1,88 @@
+name: Build Speedometer
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+      KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+      KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+      KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Unpack project zip (only if the project was uploaded as a zip)
+        run: |
+          if [ -z "$(find . -maxdepth 3 -name settings.gradle -not -path './.git/*' | head -n 1)" ]; then
+            ZIP=$(find . -maxdepth 1 -iname '*.zip' | head -n 1)
+            if [ -n "$ZIP" ]; then
+              echo "Unpacking $ZIP"
+              unzip -q -o "$ZIP" -d unpacked
+            fi
+          fi
+
+      - name: Locate project folder
+        run: |
+          SETTINGS=$(find . -maxdepth 4 -name settings.gradle -not -path './.git/*' | head -n 1)
+          if [ -z "$SETTINGS" ]; then
+            echo "settings.gradle not found. Repository content:" >&2
+            find . -maxdepth 3 -not -path './.git/*' | sort >&2
+            exit 1
+          fi
+          DIR=$(dirname "$SETTINGS")
+          echo "PROJECT_DIR=$DIR" >> "$GITHUB_ENV"
+          echo "Project folder: $DIR"
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Gradle 8.13
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.13'
+
+      - name: Build debug APK
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: gradle assembleDebug --stacktrace
+
+      - name: Upload debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: speedometer-debug-apk
+          path: ${{ env.PROJECT_DIR }}/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+
+      - name: Build signed release bundle (AAB)
+        if: ${{ env.KEYSTORE_BASE64 != '' }}
+        working-directory: ${{ env.PROJECT_DIR }}
+        env:
+          KEYSTORE_PATH: ${{ runner.temp }}/release.jks
+        run: |
+          echo "$KEYSTORE_BASE64" | base64 --decode > "$KEYSTORE_PATH"
+          gradle bundleRelease --stacktrace
+
+      - name: Upload release AAB
+        if: ${{ env.KEYSTORE_BASE64 != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: speedometer-release-aab
+          path: ${{ env.PROJECT_DIR }}/app/build/outputs/bundle/release/*.aab
+          if-no-files-found: error
